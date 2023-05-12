@@ -1,66 +1,87 @@
-use clap::{Parser, ValueEnum};
-use std::{io, net, ops};
-
-// https://en.wikipedia.org/wiki/List_of_TCP_and_UDP_port_numbers#
-const WELL_KNOWN_PORTS: ops::Range<i32> = 0..1024;
-const REGISTERED_PORTS: ops::Range<i32> = 1024..49152;
-const DYBAMICALLY_ALOCATED_PORTS: ops::Range<i32> = 49152..65536;
-const ALL_PORTS: ops::Range<i32> = 0..65536;
-
-#[derive(ValueEnum, Clone)]
-#[clap(rename_all = "lowercase")]
-enum Flag {
-    All,
-    Registered,
-    Dynamic,
-    Wellknown,
-}
+use clap::Parser;
+use nix::{
+    sys::signal::{kill, Signal},
+    unistd::Pid,
+};
+use procfs::{net, process::FDTarget};
 
 #[derive(Parser)]
 struct Cli {
     #[arg(short, long)]
-    range: Option<Flag>,
+    list: bool,
+    #[arg(short, long)]
+    kill: Option<u16>,
+}
+
+struct ProcessInfo {
+    port: u16,
+    inode: u64,
 }
 
 fn main() {
     let args = Cli::parse();
+    let processes_info = get_processes_info();
 
-    // When range is not specified - print all ports
-    match args.range {
-        Some(range) => print_used_ports(range),
-        None => print_used_ports(Flag::All),
+    if args.list {
+        for process_info in &processes_info {
+            println!("{}", process_info.port);
+        }
     }
-}
 
-fn print_used_ports(range: Flag) {
-    let range = match range {
-        Flag::All => ALL_PORTS,
-        Flag::Registered => REGISTERED_PORTS,
-        Flag::Dynamic => DYBAMICALLY_ALOCATED_PORTS,
-        Flag::Wellknown => WELL_KNOWN_PORTS,
-    };
-
-    for port in range {
-        if let Err(e) = is_port_in_use(port) {
-            println!("Port {} {}", port, e);
+    if let Some(port) = args.kill {
+        match processes_info.iter().find(|&item| item.port == port) {
+            Some(process_info) => {
+                kill_process_by_inode(process_info.inode);
+            }
+            None => {
+                println!("Port {} is not in use!", port);
+            }
         }
     }
 }
 
-fn is_port_in_use(port: i32) -> Result<(), io::Error> {
-    let listener: Result<net::TcpListener, std::io::Error> =
-        net::TcpListener::bind(format!("localhost:{}", port));
+fn get_processes_info() -> Vec<ProcessInfo> {
+    let tcp: Vec<net::TcpNetEntry> = net::tcp().expect("Unable to get tcp entries!");
+    let tcp6: Vec<net::TcpNetEntry> = net::tcp6().expect("Unable to get tcp6 entries!");
+    let mut processes: Vec<ProcessInfo> = Vec::new();
 
-    if let Err(e) = listener {
-        return Err(e);
+    let tcp_entries: Vec<net::TcpNetEntry> = [&tcp[..], &tcp6[..]].concat();
+
+    for entry in tcp_entries {
+        if entry.state == net::TcpState::Listen {
+            // Get only ports that are listening and not established
+            let address = entry.local_address.to_string();
+
+            if let Some(port_str) = address.rsplitn(2, ':').next() {
+                if let Ok(port) = port_str.parse::<u16>() {
+                    let process = ProcessInfo {
+                        port,
+                        inode: entry.inode,
+                    };
+                    processes.push(process);
+                }
+            }
+        }
     }
-
-    Ok(())
+    processes
 }
 
-// fn kill_process_by_port(port: i32) {
-//     if let Ok(_) = is_port_in_use(port) {
-//         println!("Port {} is not in use!", port);
-//         return;
-//     }
-// }
+fn kill_process_by_inode(target_inode: u64) {
+    let processes = procfs::process::all_processes().expect("Unable to get processes!");
+
+    for process in processes {
+        if let Ok(process) = process {
+            if let Ok(fds) = process.fd() {
+                for fd in fds {
+                    if let Ok(fd) = fd {
+                        if let FDTarget::Socket(inode) = fd.target {
+                            if target_inode == inode {
+                                kill(Pid::from_raw(process.pid), Signal::SIGKILL).unwrap();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
