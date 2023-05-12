@@ -9,8 +9,8 @@ use procfs::{net, process::FDTarget};
 struct Cli {
     #[arg(short, long)]
     list: bool,
-    #[arg(short, long)]
-    kill: Option<u16>,
+    #[arg(short, long, num_args = 1..)]
+    kill: Vec<u16>,
 }
 
 struct ProcessInfo {
@@ -28,7 +28,7 @@ fn main() {
         }
     }
 
-    if let Some(port) = args.kill {
+    for port in args.kill {
         match processes_info.iter().find(|&item| item.port == port) {
             Some(process_info) => {
                 kill_process_by_inode(process_info.inode);
